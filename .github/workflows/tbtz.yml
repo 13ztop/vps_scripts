@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # 获取目标仓库的默认分支
-      - name: Detect default branch
+      - name: Detect target default branch
         id: branch_detector
         run: |
           DEFAULT_BRANCH=$(curl -s -H "Authorization: token ${{ secrets.SYNC_TOKEN }}" \
@@ -18,7 +18,7 @@ jobs:
           echo "Detected default branch: $DEFAULT_BRANCH"
           echo "DEFAULT_BRANCH=$DEFAULT_BRANCH" >> $GITHUB_ENV
 
-      # 检出目标仓库（您的仓库）
+      # 检出目标仓库
       - name: Checkout target repo
         uses: actions/checkout@v4
         with:
@@ -28,7 +28,7 @@ jobs:
           ref: ${{ env.DEFAULT_BRANCH }}
           fetch-depth: 0
 
-      # 克隆源仓库（公共仓库）
+      # 克隆源仓库
       - name: Clone source repo
         run: |
           git clone --depth 1 https://github.com/everett7623/vps_scripts.git source-repo
@@ -38,20 +38,21 @@ jobs:
       - name: Create backup directory
         run: mkdir -p /tmp/repo-backup
 
-      # 识别需要保留的文件
+      # 识别需要保留的文件（VPS脚本项目特定文件）
       - name: Identify protected files
         id: find_protected
         run: |
-          # 需要保留的核心文件列表
+          # VPS脚本项目需要保留的核心文件列表
           protected_files=(
-            "README*.md"           # 所有README文件
-            "LICENSE*"             # 许可证文件
-            ".github/workflows/*"  # 整个工作流目录
-            "config/"              # 配置目录
-            "custom-scripts/"      # 自定义脚本目录
-            "backup/"              # 备份目录
-            "env"                  # 环境文件
-            ".env"                 # 环境文件
+            "README.md"
+            "LICENSE"
+            ".github/workflows/*"    # 工作流配置
+            "config.ini"             # 配置文件
+            "credentials.env"        # 认证文件
+            "custom_scripts/*"       # 自定义脚本目录
+            "backup/*"               # 备份目录
+            "secrets/*"              # 密钥目录
+            "user_config.sh"         # 用户配置
           )
           
           # 创建保留文件列表
@@ -60,9 +61,9 @@ jobs:
             find target-repo -path "*/$pattern" -print >> /tmp/repo-backup/protected-files.txt 2>/dev/null || true
           done
           
-          # 添加额外保留文件
+          # 添加特殊处理
           echo "target-repo/.gitignore" >> /tmp/repo-backup/protected-files.txt
-          echo "target-repo/Dockerfile" >> /tmp/repo-backup/protected-files.txt
+          echo "target-repo/.github/**" >> /tmp/repo-backup/protected-files.txt
           
           # 保存文件数量
           if [ -f /tmp/repo-backup/protected-files.txt ]; then
@@ -125,11 +126,10 @@ jobs:
           if [ -d /tmp/repo-backup/protected-files ]; then
             cd /tmp/repo-backup/protected-files
             find . -type f -o -type d | while read item; do
-              if [ -d "$item" ]; then
-                mkdir -p "$GITHUB_WORKSPACE/target-repo/$item"
-              else
-                mkdir -p "$GITHUB_WORKSPACE/target-repo/$(dirname "$item")"
-                cp "$item" "$GITHUB_WORKSPACE/target-repo/$item"
+              if [ -f "$item" ] || [ -d "$item" ]; then
+                relative_path=${item#./}
+                mkdir -p "$GITHUB_WORKSPACE/target-repo/$(dirname "$relative_path")"
+                cp -r "$item" "$GITHUB_WORKSPACE/target-repo/$relative_path"
               fi
             done
           fi
@@ -141,8 +141,8 @@ jobs:
         id: commit_push
         run: |
           cd target-repo
-          git config user.name "GitHub Actions Sync"
-          git config user.email "actions@github.com"
+          git config user.name "VPS Scripts Sync Bot"
+          git config user.email "vps-sync@users.noreply.github.com"
           git add -A
           
           # 检查是否有变更
@@ -156,14 +156,20 @@ jobs:
             echo "changes_count=$changes_count" >> $GITHUB_OUTPUT
             
             # 生成提交信息
-            commit_msg="自动同步: 来自 everett7623/vps_scripts@${{ steps.source_version.outputs.commit_hash }}"
+            commit_msg="🔄 自动同步: 来自 everett7623/vps_scripts@${{ steps.source_version.outputs.commit_hash }}"
             commit_msg+="\n\n更新 $changes_count 个文件"
             if [ ${{ steps.find_protected.outputs.protected_files_count }} -gt 0 ]; then
-              commit_msg+=", 保留 ${{ steps.find_protected.outputs.protected_files_count }} 个保护文件"
+              commit_msg+=", 保留 ${{ steps.find_protected.outputs.protected_files_count }} 个自定义文件"
             fi
             
             git commit -m "$commit_msg"
-            git push origin HEAD:${{ env.DEFAULT_BRANCH }}
+            # 使用强制推送确保能更新受保护分支
+            git push --force-with-lease origin HEAD:${{ env.DEFAULT_BRANCH }}
+            
+            # 获取提交后的新commit hash
+            echo "TARGET_COMMIT_AFTER=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+            echo "TARGET_FULL_HASH_AFTER=$(git rev-parse HEAD)" >> $GITHUB_ENV
+            
             echo "commit_msg=$commit_msg" >> $GITHUB_OUTPUT
             echo "变更已成功推送"
           fi
@@ -191,17 +197,16 @@ jobs:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           message: |
-            🔄 *VPS脚本同步报告 | ${{ steps.source_version.outputs.commit_date }} (${{ env.CURRENT_TIME_SHORT }})*
+            🚀 *VPS脚本同步成功 | ${{ steps.source_version.outputs.commit_date }} (${{ env.CURRENT_TIME_SHORT }})*
             ━━━━━━━━━━━━━━━━━━━━━━━━
-            📦 **源仓库**: [everett7623/vps_scripts@${{ steps.source_version.outputs.commit_hash }}](https://github.com/everett7623/vps_scripts/commit/${{ steps.source_version.outputs.full_hash }})
-            🏠 **目标仓库**: [13ztop/vps_scripts@${{ env.TARGET_COMMIT }} (${{ env.TARGET_BRANCH }})](https://github.com/13ztop/vps_scripts/tree/${{ env.TARGET_BRANCH }})
+            🔄 **源仓库**: [everett7623/vps_scripts@${{ steps.source_version.outputs.commit_hash }}](https://github.com/everett7623/vps_scripts/commit/${{ steps.source_version.outputs.full_hash }})
+            📦 **目标仓库**: [13ztop/vps_scripts@${{ env.TARGET_COMMIT_AFTER }}](https://github.com/13ztop/vps_scripts/commit/${{ env.TARGET_FULL_HASH_AFTER }})
             ━━━━━━━━━━━━━━━━━━━━━━━━
-            • **变更文件**: ${{ steps.commit_push.outputs.changes_count }} 个
-            • **保留文件**: ${{ steps.find_protected.outputs.protected_files_count }} 个
-            • **同步时间**: ${{ env.CURRENT_TIME }}
+            📂 **变更文件**: ${{ steps.commit_push.outputs.changes_count }} 个
+            🔒 **保留文件**: ${{ steps.find_protected.outputs.protected_files_count }} 个
+            🕒 **同步时间**: ${{ env.CURRENT_TIME }}
             ━━━━━━━━━━━━━━━━━━━━━━━━
-            ✅ 同步成功! 仓库已更新
-            [查看提交详情](https://github.com/13ztop/vps_scripts/commit/${{ github.sha }})
+            ✅ 同步完成! 仓库已更新
           parse_mode: markdown
 
       # 无变更通知
@@ -214,15 +219,14 @@ jobs:
           message: |
             ℹ️ *VPS脚本同步报告 | ${{ steps.source_version.outputs.commit_date }} (${{ env.CURRENT_TIME_SHORT }})*
             ━━━━━━━━━━━━━━━━━━━━━━━━
-            📦 **源仓库**: [everett7623/vps_scripts@${{ steps.source_version.outputs.commit_hash }}](https://github.com/everett7623/vps_scripts)
-            🏠 **目标仓库**: [13ztop/vps_scripts@${{ env.TARGET_COMMIT }}](https://github.com/13ztop/vps_scripts)
+            🔄 **源仓库**: [everett7623/vps_scripts@${{ steps.source_version.outputs.commit_hash }}](https://github.com/everett7623/vps_scripts)
+            📦 **目标仓库**: [13ztop/vps_scripts@${{ env.TARGET_COMMIT }}](https://github.com/13ztop/vps_scripts)
             ━━━━━━━━━━━━━━━━━━━━━━━━
-            • **保留文件**: ${{ steps.find_protected.outputs.protected_files_count }} 个
-            • **同步状态**: 内容一致，无需更新
-            • **检测时间**: ${{ env.CURRENT_TIME }}
+            🔒 **保留文件**: ${{ steps.find_protected.outputs.protected_files_count }} 个
+            🆗 **同步状态**: 内容一致，无需更新
+            🕒 **检测时间**: ${{ env.CURRENT_TIME }}
             ━━━━━━━━━━━━━━━━━━━━━━━━
             ✅ 仓库已是最新状态
-            [查看仓库](https://github.com/13ztop/vps_scripts)
           parse_mode: markdown
 
       # 同步失败通知
@@ -235,9 +239,9 @@ jobs:
           message: |
             ‼️ *VPS脚本同步失败 | ${{ env.CURRENT_TIME_SHORT }}*
             ━━━━━━━━━━━━━━━━━━━━━━━━
-            🔧 **工作流**: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-            ⏰ **发生时间**: ${{ env.CURRENT_TIME }}
+            ⚙️ **工作流**: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            🕒 **发生时间**: ${{ env.CURRENT_TIME }}
             ━━━━━━━━━━━━━━━━━━━━━━━━
-            🚨 同步过程遇到错误，请检查日志!
+            ❌ 错误详情: 请检查工作流日志
             [查看错误详情](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
           parse_mode: markdown
